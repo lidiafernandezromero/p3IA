@@ -5,12 +5,13 @@ Start = (0,0) ; Goal = (2,3).
 Accions: 0=amunt, 1=avall, 2=esquerra, 3=dreta. Si l'acció surt del grid, l'agent es queda quiet.
 Autores: Lidia i Maria
 """
+import random
 import numpy as np
 
 N_ROWS, N_COLS = 3, 4
-START, GOAL = (0, 0), (2, 3)
+START, GOAL, BLOCKED = (0, 0), (2, 3), (1, 1)
 ACTIONS = [(1, 0), (-1, 0), (0, -1), (0, 1)]
-ACTION_NAMES = ["amunt", "avall", "esq", "dreta"]
+NAMES = ["up", "down", "left", "right"]
 
 
 # ---REWARDS---
@@ -21,7 +22,7 @@ def reward_a():
     return R
 
 # more accurate reward function, 
-# - (Manhattan Distance to goal), 100 at goal.
+# - (Manhattan Distance to the goal), 100 at the goal.
 def reward_b():
     R = np.zeros((N_ROWS, N_COLS))
     for r in range(N_ROWS):
@@ -34,144 +35,178 @@ def reward_b():
 
 # applies the movement. 
 def move(state, action):
-    dr, dc = ACTIONS[action]
-    nr, nc = state[0] + dr, state[1] + dc
-    if not (0 <= nr < N_ROWS and 0 <= nc < N_COLS): #outside the grid -> returns the same state.
+    nr = state[0] + ACTIONS[action][0]
+    nc = state[1] + ACTIONS[action][1]
+    #outside the grid or on blocked cell -> returns the same state.
+    if nr < 0 or nr >= N_ROWS or nc < 0 or nc >= N_COLS or (nr, nc) == BLOCKED:
         return state
     return (nr, nc)
 
+
 #adds stochasticity to the action. For the drunken sailor.
-def step(state, action, R, rng, p_intended=1.0): #p=1.0 means deterministic, p<1.0 means stochastic.
-    if rng.random() > p_intended: #when p < 1.0
-        action = rng.choice([a for a in range(4) if a != action]) #the action is replaced by one of the other 3 actions at random 
-    ns = move(state, action) #do the movement
-    return ns, R[ns], ns == GOAL
+# With probability 1-p_intended the action is replaced by one of the other 3 (drunken sailor).
+# p_intended=1 -> deterministic.
+
+def step(state, action, R, p_intended=1.0): #p=1.0 means deterministic, p<1.0 means stochastic.
+    if random.random() > p_intended: #when p < 1.0
+        others = [a for a in range(4) if a != action]
+        action = random.choice(others)
+        
+    next_state = move(state, action)#do the movement
+    return next_state, R[next_state], next_state == GOAL
 
 
-# ----Q LEARNING-----
-def optimal_Q(R, gamma, p_intended=1.0, iters=300):
-    Q = np.zeros((N_ROWS, N_COLS, 4))
-    for _ in range(iters):
-        Qn = np.zeros_like(Q)
-        for r in range(N_ROWS):
-            for c in range(N_COLS):
-                s = (r, c)
-                if s == GOAL:
-                    continue
-                for a in range(4):
-                    val = 0.0
-                    probs = {a: p_intended}
-                    for b in range(4):
-                        if b != a:
-                            probs[b] = (1 - p_intended) / 3
-                    for b, p in probs.items():
-                        ns = move(s, b)
-                        val += p * (R[ns] + (0 if ns == GOAL else gamma * Q[ns].max()))
-                    Qn[r, c, a] = val
-        Q = Qn
-    return Q
 
+# Path followed by the greedy policy (always the best action of the Q-table)
+def greedy_path(Q, max_steps=50):
+    s = START
+    path, acts = [s], []
 
-# ---------- Q-learning ----------
-def q_learning(R, alpha=0.1, gamma=0.9, epsilon=0.2, p_intended=1.0,
-               max_episodes=5000, max_steps=500, stable_window=100, seed=0,
-               fixed_episodes=None, err_tol=2.0):
-    """Convergència = durant `stable_window` episodis consecutius es compleix que:
-      (1) el camí greedy des de START arriba al goal amb la mateixa longitud que el camí
-          òptim segons Q* (value iteration), i
-      (2) |max_a Q(START,a) - V*(START)| < err_tol.
-    Si fixed_episodes != None, no s'atura abans (útil per imprimir Q-tables)."""
-    rng = np.random.default_rng(seed)
-    Qstar = optimal_Q(R, gamma, p_intended)
-    opt_len = len(greedy_path(Qstar, R)[1])
-    Vstar = Qstar[START].max()
-    Q = np.zeros((N_ROWS, N_COLS, 4))
-    history, steps_per_ep = [], []
-    last_policy, stable, conv_ep = None, 0, None
-    n_ep = fixed_episodes or max_episodes
-
-    for ep in range(1, n_ep + 1):
-        s = START
-        for t in range(max_steps):
-            a = rng.integers(4) if rng.random() < epsilon else int(np.argmax(Q[s]))
-            ns, r, done = step(s, a, R, rng, p_intended)
-            target = r if done else r + gamma * Q[ns].max()
-            Q[s][a] += alpha * (target - Q[s][a])
-            s = ns
-            if done:
-                break
-        steps_per_ep.append(t + 1)
-        history.append(Q.copy())
-
-        path_ok = (greedy_path(Q, R)[0][-1] == GOAL and len(greedy_path(Q, R)[1]) == opt_len)
-        v_ok = abs(Q[START].max() - Vstar) < err_tol
-        stable = stable + 1 if (path_ok and v_ok) else 0
-        if stable >= stable_window and conv_ep is None:
-            conv_ep = ep - stable_window
-            if fixed_episodes is None:
-                break
-    return Q, history, steps_per_ep, conv_ep
-
-
-def greedy_path(Q, R, max_steps=50):
-    rng = np.random.default_rng(0)
-    s, path, acts = START, [START], []
+    #iterate until we reach the goal or max_steps 
     for _ in range(max_steps):
         a = int(np.argmax(Q[s]))
-        s, _, done = step(s, a, R, rng, 1.0)
-        acts.append(ACTION_NAMES[a]); path.append(s)
-        if done:
+        s = move(s, a)
+        path.append(s)
+        acts.append(NAMES[a])
+        if s == GOAL:
             break
     return path, acts
 
 
-def print_q(Q, title):
-    print(f"\n--- {title} ---")
-    print("Estat (fila,col) | " + " | ".join(f"{n:>8}" for n in ACTION_NAMES))
+# ----Q LEARNING-----
+
+def q_learning(R, alpha=0.1, gamma=0.9, epsilon=0.2, p_intended=1.0,
+               max_episodes=5000, max_steps=500,  stable_needed=20, threshold=0.1):
+
+    # Initialize 
+    Q = np.zeros((N_ROWS, N_COLS, 4)) #q-table with 4 actions for each state (zeros at first)
+    history = [] #history of Q-tables 
+
+    # Convergence: the Q-table practically stops changing (the prediction
+    # matches the real reward). 
+    Q_old = Q.copy()
+    stable = 0
+    converged = False
+
+    #iterate over episodes
+    for ep in range(max_episodes):
+        #start state
+        s = START
+
+        # Run one episode.
+        for t in range(max_steps):
+            # Choose an action using epsilon-greedy.
+            if random.random() < epsilon:
+                a = random.randrange(4)
+            else:
+                # choose the action with the highest Q-value for the current state
+                a = int(np.argmax(Q[s]))
+
+            # Take the action and see the next state and reward.
+            ns, r, done = step(s, a, R,  p_intended)
+
+            #Q-learning update
+            if done:
+                target = r  # if we reach the goal, the target is just the reward
+            else:
+                target = r + gamma * Q[ns].max()  # otherwise, it's the reward plus the discounted max Q-value of the next state
+
+            Q[s][a] += alpha * (target - Q[s][a]) # update the Q-value for the current state and action
+
+            # Move to the next state.
+            s = ns
+
+            # if we reach the goal, end the episode
+            if done:
+                break
+
+        #save a copy of the Q-table 
+        history.append(Q.copy())
+
+        # CONVERGENCE CHECK
+        # Check if the Q-table has stabilized by comparing it to the previous Q-table.
+        change = np.abs(Q - Q_old).max()
+        if change < threshold:
+            stable += 1
+        else:
+            stable = 0
+        Q_old = Q.copy()
+
+        if stable >= stable_needed:
+            converged = True
+            break
+
+    return Q, history, converged
+
+
+#---OUTPUT---
+
+# Prints the Q-table in the file 
+def print_q(Q, title, file):
+    print(f"\n--- {title} ---", file=file)
+    print("State (row,col) | " + " | ".join(f"{n:>8}" for n in NAMES), file=file)
+
     for r in range(N_ROWS - 1, -1, -1):
         for c in range(N_COLS):
-            print(f"      ({r+1},{c+1})     | " + " | ".join(f"{v:8.2f}" for v in Q[r, c]))
+            print(f"      ({r+1},{c+1})     | " +
+                  " | ".join(f"{v:8.2f}" for v in Q[r, c]), file=file)
 
 
-def run_experiment(name, R, **kw):
-    print("=" * 70); print(name, kw); print("=" * 70)
-    Q, hist, steps, conv = q_learning(R, **kw)
-    n = len(hist)
-    for label, idx in [("Q-table 1 (episodi 1)", 0),
-                       (f"Q-table intermèdia 1 (episodi {max(1, n//3)})", max(1, n // 3) - 1),
-                       (f"Q-table intermèdia 2 (episodi {max(1, 2*n//3)})", max(1, 2 * n // 3) - 1),
-                       (f"Q-table final (episodi {n})", n - 1)]:
-        print_q(hist[idx], label)
-    Qs = optimal_Q(R, kw["gamma"], kw.get("p_intended", 1.0))
-    mask = np.ones((N_ROWS, N_COLS), bool); mask[GOAL] = False
-    err = np.abs(Q - Qs)[mask].max()
-    path, acts = greedy_path(Q, R)
-    print("\nConvergència (camí òptim + V(start)≈V*) des de l'episodi:", conv, "| episodis totals:", n)
-    print(f"max|Q - Q*| (estats no terminals) = {err:.2f}")
-    print("Camí greedy:", path)
-    print("Accions:", acts)
-    return Q, conv
+# Runs the experiment and saves all results to a text file.
+def run_experiment(name, R, file, **params):
+    print("=" * 70, file=file)
+    print(name, params, file=file)
+    print("=" * 70, file=file)
+
+    Q, history, converged = q_learning(R, **params)
+    n = len(history)
+
+    # Print the first, two intermediate and final Q-tables.
+    for label, ep in [("First Q-table", 1),
+                      ("Intermediate Q-table 1", max(1, n // 3)),
+                      ("Intermediate Q-table 2", max(1, 2 * n // 3)),
+                      ("Final Q-table", n)]:
+        print_q(history[ep - 1], f"{label} (episode {ep})", file)
+
+    # Print the greedy path and actions.
+    path, acts = greedy_path(Q)
+
+    print("\nLearned path:", path, file=file)
+    print("Actions:", acts, file=file)
+    print("Episodes run:", n, file=file)
+    if converged:
+        print("Converged at episode", n, file=file)
+    else:
+        print("Did NOT converge within the maximum number of episodes", file=file)
 
 
-def multi_seed(R, label, seeds=20, **kw):
-    convs = [q_learning(R, seed=s, **kw)[3] for s in range(seeds)]
-    ok = [c for c in convs if c is not None]
-    if not ok:
-        print(f"[{label}] cap seed ha convergit"); return
-    print(f"[{label}] episodis fins convergir ({len(ok)}/{seeds} seeds): "
-          f"mitjana={np.mean(ok):.0f}, mediana={np.median(ok):.0f}, min={min(ok)}, max={max(ok)}")
-
-
+# ---MAIN----
 if __name__ == "__main__":
+
+    random.seed(0) 
+
+    # Parameters used in the experiments.
     P = dict(alpha=0.1, gamma=0.9, epsilon=0.2)
 
-    run_experiment("1a) Reward -1 / 100 (determinista)", reward_a(), **P)
-    run_experiment("1b) Reward distància (determinista)", reward_b(), **P)
-    run_experiment("1c) Borratxo, reward -1/100", reward_a(), p_intended=0.99, **P)
-    run_experiment("1c) Borratxo, reward distància", reward_b(), p_intended=0.99, **P)
+    # Open the file where all results will be saved.
+    with open("resultats_grid.txt", "w", encoding="utf-8") as file:
 
-    print("\n" + "=" * 70 + "\nResum de convergència (20 seeds)\n" + "=" * 70)
-    multi_seed(reward_a(), "1a det.", **P)
-    multi_seed(reward_b(), "1b det.", **P)
-    multi_seed(reward_a(), "1c estoc. -1/100", p_intended=0.99, **P)
-    multi_seed(reward_b(), "1c estoc. distància", p_intended=0.99, **P)
+        # 1a) Deterministic environment with reward -1 / 100.
+        run_experiment("1a) Reward -1 / 100 (deterministic)",
+                       reward_a(), file, **P)
+
+        # 1b) Deterministic environment with distance-based reward.
+        run_experiment("1b) Distance reward (deterministic)",
+                       reward_b(), file, **P)
+
+        # 1c) Stochastic environment with reward -1 / 100.
+        run_experiment("1c) Drunken sailor, reward -1 / 100",
+                       reward_a(), file, p_intended=0.99, **P)
+
+        # 1c) Stochastic environment with distance-based reward.
+        run_experiment("1c) Drunken sailor, distance reward",
+                       reward_b(), file, p_intended=0.99, **P)
+
+    print("All results have been saved in resultats_grid.txt")
+
+
